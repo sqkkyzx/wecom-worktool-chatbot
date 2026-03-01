@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 RUN pip install --no-cache-dir --upgrade pip uv
 
@@ -7,8 +7,7 @@ WORKDIR $FASTAPI_HOME
 
 COPY pyproject.toml uv.lock* ./
 
-RUN uv export --frozen --no-dev --output-file requirements.txt && \
-    uv pip install --system --no-cache-dir -r requirements.txt
+RUN uv sync --no-dev --system
 
 COPY main.py ./
 CMD ["python", "main.py"]
