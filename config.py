@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 
     # Worktool 机器人配置
     robot_id: str
-    robot_key: str
+    robot_key: str | None = None
 
     # Dify 配置
     dify_url: str
