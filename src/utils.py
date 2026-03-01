@@ -128,7 +128,7 @@ def _send_worktool_chunk(request: WorktoolMessageRequest, text: str):
     try:
         with bot.action as action:
             if request.roomType in [1, 3]:  # 群聊模式
-                action.send_text(receiver=[request.groupRemark], msg=text)
+                action.send_text(receiver=[request.groupRemark or request.groupName], msg=text)
             else:  # 单聊模式
                 action.send_text(receiver=[request.receivedName], msg=text)
     except Exception as e:
