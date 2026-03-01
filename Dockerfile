@@ -10,5 +10,6 @@ COPY pyproject.toml uv.lock* ./
 RUN uv export --frozen --no-hashes --no-dev --output-file requirements.txt && \
     uv pip install --system --no-cache-dir -r requirements.txt
 
-COPY main.py ./
+COPY src/ ./
+
 CMD ["python", "main.py"]
