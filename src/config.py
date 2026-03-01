@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     metrics_password: str = "admin"
 
     conversation_expire: int = 60 * 60 * 48
+    wake_words: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

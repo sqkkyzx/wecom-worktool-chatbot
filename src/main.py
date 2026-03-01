@@ -4,7 +4,7 @@ import uvicorn
 from fastapi import FastAPI, BackgroundTasks, Depends
 from fastapi.responses import Response
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-
+from config import settings
 from metrics import metrics_receive_msg_counter, metrics_db_error_counter, update_custom_metrics
 from utils import (
     bot, verify_metrics_auth, init_database, save_incoming_message, process_and_reply,
@@ -45,7 +45,25 @@ async def receive_message(msg: WorktoolMessageRequest, background_tasks: Backgro
         msg_id = save_incoming_message(msg)
 
         # 2. 将 Dify 流式请求与发送回复的操作扔进后台任务队列
-        if (msg.textType == 1 or msg.textType == 15) and (msg.atMe or msg.roomType in [2, 4]):
+        need_reply = False
+        if msg.textType in [1, 15]:  # 首先必须是文本类的消息
+            # 解析唤醒词并检查
+            has_wake_word = False
+            if settings.wake_words and msg.spoken:
+                wake_word_list = [w.strip() for w in settings.wake_words.split(',') if w.strip()]
+                # 判断 msg.spoken 中是否包含任意一个唤醒词
+                has_wake_word = any(word in msg.spoken for word in wake_word_list)
+
+            # 触发条件：
+            # 被 @ 了或消息体里包含了唤醒词
+            if msg.atMe or has_wake_word:
+                need_reply = True
+            # 单聊
+            elif msg.roomType in [2, 4]:
+                need_reply = True
+
+        if need_reply:
+            # 触发 Dify 流式请求
             background_tasks.add_task(process_and_reply, msg_id, msg)
 
         # 3. 立即响应 WeCom 回调 HTTP 200，避免企微网关超时重试
