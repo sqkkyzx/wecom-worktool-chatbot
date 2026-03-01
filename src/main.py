@@ -6,8 +6,12 @@ from contextlib import asynccontextmanager
 from typing import Optional
 import uvicorn
 
+import secrets
+from fastapi import Depends, HTTPException, status
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import Response
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+
 from pydantic import BaseModel, Field
 import psycopg
 from prometheus_client import Counter, Gauge, Info, generate_latest, CONTENT_TYPE_LATEST
@@ -53,6 +57,25 @@ class WorktoolMessageRequest(BaseModel):
 class WorktoolMessageResponse(BaseModel):
     code: int = 0
     message: str = "success"
+
+
+# ==================== Basic Auth ====================
+security = HTTPBasic()
+
+
+def verify_metrics_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    """校验 Prometheus 抓取时的 Basic Auth 凭证"""
+    # 使用 secrets.compare_digest 防止时序攻击
+    correct_username = secrets.compare_digest(credentials.username, settings.metrics_user)
+    correct_password = secrets.compare_digest(credentials.password, settings.metrics_password)
+
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials
 
 
 # ==================== 生命周期管理 (数据库初始化) ====================
@@ -291,7 +314,7 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
         _send_worktool_chunk(request, "抱歉，连接大模型服务时出现了异常。")
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(verify_metrics_auth)])
 async def get_metrics():
     """Prometheus 监控指标抓取接口"""
     # 每次 Prometheus 来拉取数据时，尝试更新自定义指标（内置 60s 缓存）

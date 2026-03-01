@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     dify_url: str
     dify_token: str
 
+    metrics_user: str = "admin"
+    metrics_password: str = "admin"
+
     conversation_expire: int = 60 * 60 * 48
 
     model_config = SettingsConfigDict(
