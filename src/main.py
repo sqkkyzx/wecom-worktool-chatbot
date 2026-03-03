@@ -1,11 +1,14 @@
 import logging
 from contextlib import asynccontextmanager
+
+import httpx
 import uvicorn
 from fastapi import FastAPI, BackgroundTasks, Depends
 from fastapi.responses import Response
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from config import settings
 from metrics import metrics_receive_msg_counter, metrics_db_error_counter, update_custom_metrics
+import utils
 from utils import (
     bot, verify_metrics_auth, init_database, save_incoming_message, process_and_reply,
     WorktoolMessageRequest, WorktoolMessageResponse
@@ -14,12 +17,21 @@ from utils import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期钩子：服务启动时触发初始化"""
     logging.info("服务启动...")
     init_database()
+    # 启动时初始化，开启 Keep-Alive 复用
+    timeout_config = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
+    utils.http_client = httpx.AsyncClient(timeout=timeout_config)
+    logging.info("全局 HTTP Client 已初始化")
     yield
+    # 2. 关闭时：优雅释放所有保持的 TCP 连接
+    if utils.http_client:
+        await utils.http_client.aclose()
+        logging.info("全局 HTTP Client 已关闭")
     logging.info("服务关闭...")
 
 
