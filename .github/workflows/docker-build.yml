@@ -1,44 +1,64 @@
-name: Build and Push Docker Image
+name: 构建并推送镜像
 
 on:
   push:
     branches: [ "master" ]
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: ${{ github.repository }}
+  RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
-      - name: Checkout repository
+      - name: 📥 拉取代码仓库
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Set up Docker Buildx
+      - name: ⚙️ 配置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to the Container registry
+      - name: 🏷️ 提取 pyproject.toml 版本号
+        id: get_version
+        run: |
+          # 提取 version = "0.1.0" 中的数字
+          VERSION=$(grep -m 1 'version = ' pyproject.toml | cut -d '"' -f 2)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "提取到版本号: $VERSION"
+
+      - name: 🔑 登录 GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: 🔑 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 📝 准备 Docker 镜像元数据
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=latest
+            type=raw,value=${{ env.VERSION }}
             type=sha,prefix=
 
-      - name: Build and push
+      - name: 📦 构建并推送镜像
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -48,25 +68,44 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # --- 通知步骤 ---
-      - name: Send Notification
-        if: always() # 无论成功失败都执行
+      - name: 🔖 自动创建并推送 Git Tag
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          # 如果不存在该版本的 tag，则创建并推送
+          if ! git rev-parse "v${{ env.VERSION }}" >/dev/null 2>&1; then
+            git tag "v${{ env.VERSION }}"
+            git push origin "v${{ env.VERSION }}"
+            echo "已自动创建并推送 Tag: v${{ env.VERSION }}"
+          else
+            echo "Tag v${{ env.VERSION }} 已存在，跳过。"
+          fi
+
+      - name: 📢 发送钉钉构建通知
+        if: always()
         env:
-          # 在这里引用 Secret
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
         run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
           if [ "${{ job.status }}" == "success" ]; then
-            MSG="✅ [Video-Service] 镜像构建成功！\n请在 NAS 上执行 docker pull 更新。"
+            MSG="#### ${{ github.repository }} \n\n > 构建状态：[成功 ✅](${{ env.RUN_URL }}) \n\n > 版本: v${{ env.VERSION }} \n\n > GHCR: ${{ env.GHCR_IMAGE }} \n\n > DockerHub: ${{ env.DOCKERHUB_IMAGE }}"          
+            TITLE="✅ 构建成功！"
           else
-            MSG="❌ [Video-Service] 镜像构建失败，请登录 GitHub 检查。"
+            MSG="#### ${{ github.repository }} \n\n > 构建状态：[失败 ❌](${{ env.RUN_URL }}) \n\n > 版本: v${{ env.VERSION }} "
+            TITLE="❌ 构建失败！"
           fi
           
-          # 如果你有配置 Secret 才会发送，没配置则跳过
           if [ -n "$WEBHOOK_URL" ]; then
-             # 这是一个简单的通用请求，根据你的接收端修改 JSON 结构
-             curl -X POST -H "Content-Type: application/json" \
-                  -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$MSG\"}}" \
-                  "$WEBHOOK_URL"
-          else
-             echo "没有配置 WEBHOOK_URL，跳过通知发送。"
+             # 修正为钉钉的标准 JSON 结构
+             curl -X POST "$WEBHOOK_URL" \
+                  -H "Content-Type: application/json" \
+                  -d "{
+                    \"msgtype\": \"markdown\",
+                    \"markdown\": {
+                      \"title\": \"$MSG\",
+                      \"text\": \"$MSG\"
+                    }
+                  }"
           fi
+

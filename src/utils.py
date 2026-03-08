@@ -37,14 +37,14 @@ security = HTTPBasic()
 
 # ==================== Pydantic 数据模型 ====================
 class WorktoolMessageRequest(BaseModel):
-    spoken: str = Field(description="问题文本")
-    rawSpoken: str = Field(description="原始问题文本")
-    receivedName: str = Field(description="提问者名称")
-    groupName: str = Field(description="QA所在群名（群聊）")
-    groupRemark: str = Field(description="QA所在群备注名（群聊）")
-    roomType: int = Field(description="QA所在房间类型 1=外部群 2=外部联系人 3=内部群 4=内部联系人")
-    atMe: bool = Field(description="是否@机器人（群聊）")
-    textType: int = Field(description="消息类型 0=未知 1=文本 2=图片 3=语音 5=视频 7=小程序 8=链接 9=文件 13=合并记录 15=带回复文本")
+    spoken: str = Field(default="", description="问题文本")
+    rawSpoken: str = Field(default="", description="原始问题文本")
+    receivedName: str = Field(default="", description="提问者名称")
+    groupName: str = Field(default="", description="QA所在群名（群聊）")
+    groupRemark: str = Field(default="", description="QA所在群备注名（群聊）")
+    roomType: int = Field(default=4, description="QA所在房间类型 1=外部群 2=外部联系人 3=内部群 4=内部联系人")
+    atMe: bool = Field(default=False, description="是否@机器人（群聊）")
+    textType: int = Field(default=0, description="消息类型 0=未知 1=文本 2=图片 3=语音 5=视频 7=小程序 8=链接 9=文件 13=合并记录 15=带回复文本")
     fileBase64: Optional[str] = Field(default="")
 
 class WorktoolMessageResponse(BaseModel):

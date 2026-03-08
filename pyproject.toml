@@ -1,7 +1,7 @@
 [project]
 name = "wecom-worktool-chatbot"
 version = "0.1.0"
-description = "Add your description here"
+description = ""
 requires-python = ">=3.13"
 dependencies = [
     "wecom-worktool>=0.1.2",
