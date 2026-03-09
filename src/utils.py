@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from wecom_worktool import WorktoolAction
 from config import settings
+import asyncio
 
 # 引入抽离的监控指标
 from metrics import (
@@ -410,7 +411,7 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
 
 
 async def _run_single_memory_workflow(received_name: str, group_name: str, days: int) -> bool:
-    """内部函数：处理单个用户的记忆生成请求"""
+    """内部函数：处理单个用户的记忆生成请求（使用 Streaming 防超时）"""
     global http_client
     if not settings.dify_token_for_memory:
         return False
@@ -429,30 +430,58 @@ async def _run_single_memory_workflow(received_name: str, group_name: str, days:
             "receivedName": received_name,
             "groupName": group_name
         },
-        "response_mode": "blocking",
+        "response_mode": "streaming",  # <--- 核心修改：改为流式
         "user": user_identifier
     }
 
     try:
-        res = await http_client.post(
-            f"{settings.dify_url}/workflows/run",
-            headers={"Authorization": f"Bearer {settings.dify_token_for_memory}"},
-            json=payload,
-            timeout=120.0
-        )
-        res.raise_for_status()
-        data = res.json()
+        new_memory = ""
+        # 使用流式请求保持连接活性
+        async with http_client.stream(
+                method="POST",
+                url=f"{settings.dify_url}/workflows/run",
+                headers={"Authorization": f"Bearer {settings.dify_token_for_memory}"},
+                json=payload,
+                timeout=180.0  # Dify 本身的响应可能会比较久，给足时间
+        ) as response:
+            response.raise_for_status()
 
-        outputs = data.get("data", {}).get("outputs", {})
-        new_memory = outputs.get("memory", outputs.get("text", outputs.get("result", "")))
-        if not new_memory and outputs:
-            new_memory = str(list(outputs.values())[0])
+            # 解析 SSE 流
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+
+                raw_data = line[len("data:"):].strip()
+                if not raw_data:
+                    continue
+
+                try:
+                    event_data = json.loads(raw_data)
+                    event = event_data.get('event')
+
+                    # 捕获工作流完成的最终输出
+                    if event == "workflow_finished":
+                        outputs = event_data.get('data', {}).get('outputs', {})
+                        new_memory = outputs.get("memory", outputs.get("text", outputs.get("result", "")))
+                        if not new_memory and outputs:
+                            new_memory = str(list(outputs.values())[0])
+                        break
+
+                    elif event == "error":
+                        error_msg = event_data.get('message', '未知错误')
+                        logging.error(f"提取 {received_name} 记忆时 Dify 报错: {error_msg}")
+                        break
+
+                except json.JSONDecodeError:
+                    continue
 
         if new_memory:
             await run_in_threadpool(save_new_memory, received_name, group_name, new_memory)
             return True
+
     except Exception as e:
-        logging.error(f"提取 {received_name} 记忆失败: {e}")
+        logging.error(f"提取 {received_name} 记忆请求异常: {e}")
+
     return False
 
 
@@ -470,10 +499,11 @@ async def execute_batch_memory_workflow(request: WorktoolMessageRequest, target_
 
     success_count = 0
     for user in users:
-        # 串行执行，避免瞬间高并发打满 Dify 并发限制
         is_success = await _run_single_memory_workflow(user, target_group, days)
         if is_success:
             success_count += 1
+
+        await asyncio.sleep(3)  # <--- 核心修改：排队缓冲
 
     await run_in_threadpool(_send_worktool_chunk, request,
                             f"🎉 域【{target_group}】记忆提取完毕！成功更新 {success_count}/{len(users)} 人的画像。")
