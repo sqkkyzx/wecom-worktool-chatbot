@@ -53,7 +53,8 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
     # === 新增：读取并打印原始 Payload ===
     try:
         raw_body = await request.body()
-        logging.info(f"收到消息：{raw_body.decode('utf-8')}")
+        if settings.debug:
+            logging.info(f"收到消息：{raw_body.decode('utf-8')}")
         msg = WorktoolMessageRequest.model_validate_json(raw_body)
     except Exception as e:
         logging.error(f"解析原始 Payload 失败: {e}", exc_info=True)
@@ -61,7 +62,7 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
     # 增加接收流量打点
     metrics_receive_msg_counter.labels(room_type=str(msg.roomType), text_type=str(msg.textType)).inc()
-    logging.info(f"收到消息：{msg}")
+    logging.info(f"收到 {msg.groupName}/{msg.receivedName} 的消息")
     try:
         # 1. 持久化接收到的消息，并获取自增 ID
         msg_id = save_incoming_message(msg)
