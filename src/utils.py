@@ -75,7 +75,6 @@ def init_database():
         with psycopg.connect(settings.db_conn_uri) as conn:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {settings.db_schema};")
-                # 消息接收表
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {TABLE_MSG} (
                         id BIGSERIAL PRIMARY KEY,
@@ -88,15 +87,7 @@ def init_database():
                         at_me BOOLEAN NOT NULL,
                         text_type INTEGER NOT NULL,
                         file_base64 TEXT,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
-                # 机器人回复表
-                cur.execute(f"""
-                    CREATE TABLE IF NOT EXISTS {TABLE_REPLY} (
-                        id BIGSERIAL PRIMARY KEY,
-                        msg_id BIGINT REFERENCES {TABLE_MSG}(id) ON DELETE CASCADE,
-                        reply_content TEXT NOT NULL,
+                        is_bot_reply BOOLEAN DEFAULT FALSE,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
@@ -123,40 +114,66 @@ def save_incoming_message(msg: WorktoolMessageRequest) -> int:
         conn.commit()
     return msg_id
 
+def _save_reply_to_db(request: WorktoolMessageRequest, full_reply: str):
+    """持久化机器人回复消息到同一张表"""
+    with psycopg.connect(settings.db_conn_uri) as conn:
+        with conn.cursor() as cur:
+            # 对于机器人的回复，直接借用 request 中的群信息，将发送者硬编码为机器人标识
+            cur.execute(f"""
+                INSERT INTO {TABLE_MSG} 
+                (spoken, raw_spoken, received_name, group_name, group_remark, room_type, at_me, text_type, is_bot_reply) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            """, (
+                full_reply, full_reply, "我（AI）",
+                request.groupName, request.groupRemark, request.roomType,
+                False, 1  # 1=文本类型
+            ))
+        conn.commit()
 
 def get_recent_group_history(group_name: str) -> str:
-    """查询群组最近的消息并格式化输出"""
+    """查询群组最近的消息（混合用户与Bot），同时受条数和字符数限制"""
     if not group_name:
         return ""
 
     try:
         with psycopg.connect(settings.db_conn_uri) as conn:
             with conn.cursor() as cur:
-                # 倒序查询最近 limit 条记录
+                # 倒序查询最近 limit_count 条记录，包含用户和 Bot
                 cur.execute(f"""
-                    SELECT created_at, received_name, raw_spoken 
-                    FROM {TABLE_MSG} 
-                    WHERE group_name = %s AND room_type IN (1, 3)
-                    ORDER BY created_at DESC 
-                    LIMIT %s
-                """, (group_name, settings.group_history_limit))
+                        SELECT created_at, received_name, raw_spoken, is_bot_reply 
+                        FROM {TABLE_MSG} 
+                        WHERE group_name = %s AND room_type IN (1, 3)
+                        ORDER BY created_at DESC 
+                        LIMIT %s
+                    """, (group_name, settings.group_history_limit_count))
 
                 rows = cur.fetchall()
-
                 if not rows:
                     return ""
 
-                # 查出来是按时间倒序的（最新的在前面），反转以恢复正常时间流
-                rows.reverse()
-
                 history_lines = []
-                for row in rows:
-                    created_at, received_name, raw_spoken = row
-                    # 格式化时间，去掉微秒和时区，让输出更干净
-                    time_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at, 'strftime') else str(
-                        created_at)
-                    history_lines.append(f"[{time_str}] <{received_name}> 说：{raw_spoken}")
+                current_length = 0
 
+                # 遍历处理（此时顺序为：最新的消息在最前面）
+                for row in rows:
+                    created_at, received_name, raw_spoken, is_bot_reply = row
+                    time_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at, 'strftime') else \
+                    str(created_at).split('.')[0]
+
+                    sender = "AI助手" if is_bot_reply else received_name
+                    line = f"[{time_str}] <{sender}> 说：{raw_spoken}"
+
+                    line_len = len(line) + 1  # +1 为换行符留足余量
+
+                    # 触发字符长度限制，停止追溯更早的消息
+                    if current_length + line_len > settings.group_history_limit_chars:
+                        break
+
+                    history_lines.append(line)
+                    current_length += line_len
+
+                # 翻转数组，使输出符合人类直觉（旧消息在上，新消息在下）
+                history_lines.reverse()
                 return "\n".join(history_lines)
     except Exception as e:
         logging.error(f"查询群组历史消息失败: {e}")
@@ -302,7 +319,7 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
             # 3. 完整回复存入本地数据库
             if full_reply:
                 metrics_dify_reply_length_counter.inc(len(full_reply))
-                await run_in_threadpool(_save_reply_to_db, msg_id, full_reply)
+                await run_in_threadpool(_save_reply_to_db, request, full_reply)
 
         except Exception as e:
             logging.error(f"处理流式并回复消息异常: {e}", exc_info=True)

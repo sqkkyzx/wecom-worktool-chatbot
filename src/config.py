@@ -20,7 +20,8 @@ class Settings(BaseSettings):
 
     conversation_expire: int = 60 * 60 * 48
     wake_words: str | None = None
-    group_history_limit: int = 20
+    group_history_limit_count: int = 30
+    group_history_limit_chars: int = 500
 
     model_config = SettingsConfigDict(
         env_file=".env",
