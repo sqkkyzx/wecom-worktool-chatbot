@@ -124,6 +124,44 @@ def save_incoming_message(msg: WorktoolMessageRequest) -> int:
     return msg_id
 
 
+def get_recent_group_history(group_name: str) -> str:
+    """查询群组最近的消息并格式化输出"""
+    if not group_name:
+        return ""
+
+    try:
+        with psycopg.connect(settings.db_conn_uri) as conn:
+            with conn.cursor() as cur:
+                # 倒序查询最近 limit 条记录
+                cur.execute(f"""
+                    SELECT created_at, received_name, raw_spoken 
+                    FROM {TABLE_MSG} 
+                    WHERE group_name = %s AND room_type IN (1, 3)
+                    ORDER BY created_at DESC 
+                    LIMIT %s
+                """, (group_name, settings.group_history_limit))
+
+                rows = cur.fetchall()
+
+                if not rows:
+                    return ""
+
+                # 查出来是按时间倒序的（最新的在前面），反转以恢复正常时间流
+                rows.reverse()
+
+                history_lines = []
+                for row in rows:
+                    created_at, received_name, raw_spoken = row
+                    # 格式化时间，去掉微秒和时区，让输出更干净
+                    time_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at, 'strftime') else str(
+                        created_at)
+                    history_lines.append(f"[{time_str}] <{received_name}> 说：{raw_spoken}")
+
+                return "\n".join(history_lines)
+    except Exception as e:
+        logging.error(f"查询群组历史消息失败: {e}")
+        return ""
+
 # ==================== AI 请求与回复核心业务 ====================
 def _send_worktool_chunk(request: WorktoolMessageRequest, text: str):
     """辅助函数：执行单次 Worktool 发送"""
@@ -188,7 +226,13 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
             except Exception as e:
                 logging.warning(f"获取历史会话失败，回退到无会话模式: {e}")
 
-                # 2. 组装请求体并开始流式请求
+            # === 提取群聊上下文 ===
+            group_history = ""
+            if request.roomType in [1, 3] and request.groupName:
+                # 使用线程池执行同步的数据库阻塞操作
+                group_history = await run_in_threadpool(get_recent_group_history, request.groupName)
+
+            # 2. 组装请求体并开始流式请求
             payload = {
                 "inputs": {
                     "rawSpoken": request.rawSpoken,
@@ -197,7 +241,8 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
                     "groupRemark": request.groupRemark,
                     "atMe": request.atMe,
                     "roomType": request.roomType,
-                    "fileBase64": request.fileBase64
+                    "fileBase64": request.fileBase64,
+                    "groupHistory": group_history
                 },
                 "query": request.spoken,
                 "user": user_identifier,
