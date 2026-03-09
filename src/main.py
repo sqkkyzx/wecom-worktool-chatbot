@@ -1,4 +1,5 @@
 import logging
+import re
 from contextlib import asynccontextmanager
 
 import httpx
@@ -68,20 +69,38 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         # 2. 将 Dify 流式请求与发送回复的操作扔进后台任务队列
         need_reply = False
         if msg.textType in [1, 15]:  # 首先必须是文本类的消息
-            # 解析唤醒词并检查
-            has_wake_word = False
-            if settings.wake_words and msg.spoken:
-                wake_word_list = [w.strip() for w in settings.wake_words.split(',') if w.strip()]
-                # 判断 msg.spoken 中是否包含任意一个唤醒词
-                has_wake_word = any(word in msg.spoken for word in wake_word_list)
+            # === 新增逻辑：拦截 Owner 的预留命令 ===
+            # 判断条件：配置了 owner，且群名和群备注都等于 owner，且消息体以 / 开头
+            if (settings.owner and
+                    msg.groupName == settings.owner_group and
+                    msg.receivedName == settings.owner and
+                    msg.spoken.startswith("/")):
 
-            # 触发条件：
-            # 被 @ 了或消息体里包含了唤醒词
-            if msg.atMe or has_wake_word:
-                need_reply = True
-            # 单聊
-            elif msg.roomType in [2, 4]:
-                need_reply = True
+                logging.info(f"拦截到 Owner 控制台命令，当前跳过 AI 回复: {msg.spoken}")
+                # TODO: 以后可以在这里增加 execute_command(msg.spoken) 函数
+                # 正则：/记忆 [目标群组/私聊名] [天数]d
+                memory_match = re.match(r"^/记忆\s+(\S+)\s+(\d+)d", msg.spoken.strip())
+                if memory_match:
+                    target_group = memory_match.group(1)
+                    days = int(memory_match.group(2))
+                    # 抛入批量处理队列
+                    background_tasks.add_task(utils.execute_batch_memory_workflow, msg, target_group, days)
+                else:
+                    logging.info(f"未知的 Owner 命令或格式错误: {msg.spoken}")
+            else:
+                # 原有的唤醒词解析与常规回复判定逻辑
+                has_wake_word = False
+                if settings.wake_words and msg.spoken:
+                    wake_word_list = [w.strip() for w in settings.wake_words.split(',') if w.strip()]
+                    has_wake_word = any(word in msg.spoken for word in wake_word_list)
+
+                # 触发条件：
+                # 被 @ 了或消息体里包含了唤醒词
+                if msg.atMe or has_wake_word:
+                    need_reply = True
+                # 单聊
+                elif msg.roomType in [2, 4]:
+                    need_reply = True
 
         if need_reply:
             # 触发 Dify 流式请求

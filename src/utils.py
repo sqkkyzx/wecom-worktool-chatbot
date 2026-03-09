@@ -25,8 +25,9 @@ from metrics import (
 
 
 # ==================== 全局常量与实例 ====================
-TABLE_MSG = f"{settings.db_schema}.{settings.table_prefix}worktook_message"
-TABLE_REPLY = f"{settings.db_schema}.{settings.table_prefix}worktook_reply"
+TABLE_MSG = f"{settings.db_schema}.{settings.table_prefix}worktool_message"
+TABLE_MEMORY = f"{settings.db_schema}.{settings.table_prefix}worktool_memory"
+
 # 在模块级别初始化为 None
 http_client: httpx.AsyncClient | None = None
 
@@ -91,6 +92,16 @@ def init_database():
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {TABLE_MEMORY} (
+                        id BIGSERIAL PRIMARY KEY,
+                        received_name VARCHAR(255) NOT NULL,
+                        group_name VARCHAR(255) NOT NULL,
+                        memory TEXT NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_memory_created_at ON {TABLE_MEMORY} (created_at);")
             conn.commit()
     except Exception as e:
         logging.error(f"数据库初始化失败: {e}")
@@ -179,6 +190,84 @@ def get_recent_group_history(group_name: str) -> str:
         logging.error(f"查询群组历史消息失败: {e}")
         return ""
 
+
+def get_history_by_days(received_name: str, group_name: str, days: int) -> str:
+    """精准提取特定用户在特定域内的聊天记录"""
+    try:
+        with psycopg.connect(settings.db_conn_uri) as conn:
+            with conn.cursor() as cur:
+                query = f"""
+                    SELECT created_at, raw_spoken 
+                    FROM {TABLE_MSG} 
+                    WHERE group_name = %s AND received_name = %s AND is_bot_reply = FALSE 
+                    AND created_at >= CURRENT_DATE - INTERVAL '{days} days'
+                    ORDER BY created_at
+                """
+                cur.execute(query, (group_name, received_name))
+                rows = cur.fetchall()
+                if not rows: return ""
+
+                history_lines = []
+                for row in rows:
+                    created_at, raw_spoken = row
+                    time_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at, 'strftime') else str(created_at).split('.')[0]
+                    history_lines.append(f"[{time_str}] {received_name} 说：{raw_spoken}")
+                return "\n".join(history_lines)
+    except Exception as e:
+        logging.error(f"提取历史失败: {e}")
+        return ""
+
+
+def get_latest_memory(received_name: str, group_name: str) -> str:
+    """查询指定用户在指定域（群/私聊）的最新记忆"""
+    try:
+        with psycopg.connect(settings.db_conn_uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT memory FROM {TABLE_MEMORY} 
+                    WHERE received_name = %s AND group_name = %s
+                    ORDER BY created_at DESC 
+                    LIMIT 1
+                """, (received_name, group_name))
+                row = cur.fetchone()
+                return row[0] if row else ""
+    except Exception as e:
+        logging.error(f"查询最新记忆失败: {e}")
+        return ""
+
+def save_new_memory(received_name: str, group_name: str, memory_text: str):
+    """保存域隔离的新记忆"""
+    if not memory_text: return
+    try:
+        with psycopg.connect(settings.db_conn_uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    INSERT INTO {TABLE_MEMORY} (received_name, group_name, memory) 
+                    VALUES (%s, %s, %s)
+                """, (received_name, group_name, memory_text))
+            conn.commit()
+    except Exception as e:
+        logging.error(f"保存记忆失败: {e}")
+
+
+def get_active_users_in_group(group_name: str, days: int) -> list:
+    """按 group_name 聚合，找出近期发过言的所有 received_name"""
+    try:
+        with psycopg.connect(settings.db_conn_uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT DISTINCT received_name 
+                    FROM {TABLE_MSG} 
+                    WHERE group_name = %s AND is_bot_reply = FALSE 
+                    AND created_at >= CURRENT_DATE - INTERVAL '{days} days'
+                """, (group_name,))
+                rows = cur.fetchall()
+                return [row[0] for row in rows] if rows else []
+    except Exception as e:
+        logging.error(f"查询活跃用户失败: {e}")
+        return []
+
+
 # ==================== AI 请求与回复核心业务 ====================
 def _send_worktool_chunk(request: WorktoolMessageRequest, text: str):
     """辅助函数：执行单次 Worktool 发送"""
@@ -193,15 +282,6 @@ def _send_worktool_chunk(request: WorktoolMessageRequest, text: str):
     except Exception as e:
         logging.error(f"向 Worktool 推送消息块失败: {e}")
         metrics_worktool_send_error_counter.inc()
-
-def _save_reply_to_db(msg_id: int, full_reply: str):
-    with psycopg.connect(settings.db_conn_uri) as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"""
-                INSERT INTO {TABLE_REPLY} (msg_id, reply_content) 
-                VALUES (%s, %s)
-            """, (msg_id, full_reply))
-        conn.commit()
 
 async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
     """后台任务：获取历史会话 -> 流式请求 Dify -> 按换行符分段回复"""
@@ -243,6 +323,8 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
             except Exception as e:
                 logging.warning(f"获取历史会话失败，回退到无会话模式: {e}")
 
+            latest_memory = await run_in_threadpool(get_latest_memory, request.receivedName, request.groupName)
+
             # === 提取群聊上下文 ===
             group_history = ""
             if request.roomType in [1, 3] and request.groupName:
@@ -259,7 +341,8 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
                     "atMe": request.atMe,
                     "roomType": request.roomType,
                     "fileBase64": request.fileBase64,
-                    "groupHistory": group_history
+                    "groupHistory": group_history,
+                    "latestMemory": latest_memory
                 },
                 "query": request.spoken,
                 "user": user_identifier,
@@ -324,3 +407,73 @@ async def process_and_reply(msg_id: int, request: WorktoolMessageRequest):
         except Exception as e:
             logging.error(f"处理流式并回复消息异常: {e}", exc_info=True)
             await run_in_threadpool(_send_worktool_chunk, request, "抱歉，连接大模型服务时出现了异常。")
+
+
+async def _run_single_memory_workflow(received_name: str, group_name: str, days: int) -> bool:
+    """内部函数：处理单个用户的记忆生成请求"""
+    global http_client
+    if not settings.dify_token_for_memory:
+        return False
+
+    history_text = await run_in_threadpool(get_history_by_days, received_name, group_name, days)
+    if not history_text:
+        return False
+
+    latest_memory = await run_in_threadpool(get_latest_memory, received_name, group_name)
+    user_identifier = f"{received_name}__{group_name}"
+
+    payload = {
+        "inputs": {
+            "history": history_text,
+            "latest_memory": latest_memory,
+            "receivedName": received_name,
+            "groupName": group_name
+        },
+        "response_mode": "blocking",
+        "user": user_identifier
+    }
+
+    try:
+        res = await http_client.post(
+            f"{settings.dify_url}/workflows/run",
+            headers={"Authorization": f"Bearer {settings.dify_token_for_memory}"},
+            json=payload,
+            timeout=120.0
+        )
+        res.raise_for_status()
+        data = res.json()
+
+        outputs = data.get("data", {}).get("outputs", {})
+        new_memory = outputs.get("memory", outputs.get("text", outputs.get("result", "")))
+        if not new_memory and outputs:
+            new_memory = str(list(outputs.values())[0])
+
+        if new_memory:
+            await run_in_threadpool(save_new_memory, received_name, group_name, new_memory)
+            return True
+    except Exception as e:
+        logging.error(f"提取 {received_name} 记忆失败: {e}")
+    return False
+
+
+async def execute_batch_memory_workflow(request: WorktoolMessageRequest, target_group: str, days: int):
+    """主任务：扫描目标域的所有活跃用户，逐一触发记忆提取"""
+    users = await run_in_threadpool(get_active_users_in_group, target_group, days)
+
+    if not users:
+        await run_in_threadpool(_send_worktool_chunk, request,
+                                f"⚠️ 未找到域【{target_group}】在近 {days} 天的活跃用户记录。")
+        return
+
+    await run_in_threadpool(_send_worktool_chunk, request,
+                            f"🔍 域【{target_group}】找到 {len(users)} 位活跃用户，开始逐一生成记忆画像...")
+
+    success_count = 0
+    for user in users:
+        # 串行执行，避免瞬间高并发打满 Dify 并发限制
+        is_success = await _run_single_memory_workflow(user, target_group, days)
+        if is_success:
+            success_count += 1
+
+    await run_in_threadpool(_send_worktool_chunk, request,
+                            f"🎉 域【{target_group}】记忆提取完毕！成功更新 {success_count}/{len(users)} 人的画像。")

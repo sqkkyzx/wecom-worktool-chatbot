@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Dify 配置
     dify_url: str
     dify_token: str
+    dify_token_for_memory: str | None = None
 
     metrics_user: str = "admin"
     metrics_password: str = "admin"
@@ -22,6 +23,9 @@ class Settings(BaseSettings):
     wake_words: str | None = None
     group_history_limit_count: int = 30
     group_history_limit_chars: int = 500
+
+    owner: str | None = None
+    owner_group: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
