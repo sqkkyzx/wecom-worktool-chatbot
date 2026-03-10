@@ -89,11 +89,11 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
                 else:
                     logging.info(f"未知的 Owner 命令或格式错误: {msg.spoken}")
             else:
-                # 原有的唤醒词解析与常规回复判定逻辑
+                # 唤醒词解析与常规回复判定逻辑
                 has_wake_word = False
-                if settings.wake_words and msg.spoken:
+                if settings.wake_words and msg.rawSpoken:
                     wake_word_list = [w.strip() for w in settings.wake_words.split(',') if w.strip()]
-                    has_wake_word = any(word in msg.spoken for word in wake_word_list)
+                    has_wake_word = any(word in msg.rawSpoken for word in wake_word_list)
 
                 # 触发条件：
                 # 被 @ 了或消息体里包含了唤醒词
